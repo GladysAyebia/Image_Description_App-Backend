@@ -7,20 +7,25 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 5000;
 
-app.use(cors());
+app.use(cors({ origin: 'http://localhost:5173' }));
 app.use(express.json());
 
-// Configure multer (5MB limit for safety)
+// Multer for image upload (5MB limit)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }
+  limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-// Initialize Gemini API client
+// Initialize Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
+// Store sessions in memory
+const sessions = {};
+
+// Helper: Convert buffer to generative part
 function bufferToGenerativePart(buffer, mimeType) {
   return {
     inlineData: {
@@ -30,33 +35,63 @@ function bufferToGenerativePart(buffer, mimeType) {
   };
 }
 
-const model = genAI.getGenerativeModel({
-  model: 'gemini-2.0-flash',
-  systemInstruction:
-    "You are an expert image analyzer. Provide a detailed and well-structured response to the user's question about the image. Use clear markdown formatting, including headings, lists, and bold text. Include emojis where appropriate to make the response engaging and easy to read. Your response should be in a friendly and helpful tone. Wrap your final response in a markdown code block."
-});
-
+// Start a new analysis session with an image + prompt
 app.post('/api/analyze', upload.single('image'), async (req, res) => {
   try {
     if (!req.file || !req.body.prompt) {
       return res.status(400).json({ error: 'Image and prompt are required.' });
     }
 
-    const parts = [
-      bufferToGenerativePart(req.file.buffer, req.file.mimetype),
-      { text: req.body.prompt },
+    const sessionId = Date.now().toString();
+    const imagePart = bufferToGenerativePart(req.file.buffer, req.file.mimetype);
+
+    // Explicit instruction for Markdown tables (GFM)
+    const messages = [
+      {
+        role: 'user',
+        parts: [
+          imagePart,
+          {
+
+  text: `You are an expert image analyzer. Provide structured **GitHub-Flavored Markdown (GFM)**. Always include tables for tabular data, with headers and proper formatting. Do not include extra text outside the table unless explicitly asked. Align numbers properly. \n\nQuestion: ${req.body.prompt}`,
+
+          },
+        ],
+      },
     ];
 
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts }],
-    });
-
+    const result = await model.generateContent({ contents: messages });
     const text = result.response.text();
-    res.json({ result: text });
 
+    // Save session history
+    sessions[sessionId] = messages.concat({ role: 'model', parts: [{ text }] });
+
+    res.json({ sessionId, result: text });
   } catch (error) {
-    console.error('Error calling Gemini API:', error.message);
-    res.status(500).json({ error: 'Failed to generate content.' });
+    console.error('❌ Error in /api/analyze:', error.message);
+    res.status(500).json({ error: 'Failed to analyze image.' });
+  }
+});
+
+// Follow-up question
+app.post('/api/followup', async (req, res) => {
+  try {
+    const { sessionId, prompt } = req.body;
+
+    if (!sessionId || !prompt) return res.status(400).json({ error: 'sessionId and prompt are required.' });
+    if (!sessions[sessionId]) return res.status(404).json({ error: 'Session not found.' });
+
+    sessions[sessionId].push({ role: 'user', parts: [{ text: prompt }] });
+
+    const result = await model.generateContent({ contents: sessions[sessionId] });
+    const text = result.response.text();
+
+    sessions[sessionId].push({ role: 'model', parts: [{ text }] });
+
+    res.json({ result: text });
+  } catch (error) {
+    console.error('❌ Error in /api/followup:', error.message);
+    res.status(500).json({ error: 'Failed to handle follow-up.' });
   }
 });
 
