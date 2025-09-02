@@ -1,24 +1,26 @@
-import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import multer from 'multer';
+import dotenv from 'dotenv';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Use cors to allow requests from your frontend
 app.use(cors());
-app.use(express.json()); // for parsing application/json
+app.use(express.json());
 
-// Configure multer for file uploads
-const upload = multer({ storage: multer.memoryStorage() });
+// Configure multer (5MB limit for safety)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }
+});
 
-// === CORRECTION 1: Initialize genAI before it's used ===
+// Initialize Gemini API client
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// === MISSING FUNCTIONALITY: The helper function ===
-// Helper function to convert buffer to a part
 function bufferToGenerativePart(buffer, mimeType) {
   return {
     inlineData: {
@@ -28,41 +30,36 @@ function bufferToGenerativePart(buffer, mimeType) {
   };
 }
 
-// Initialize the Gemini API client
 const model = genAI.getGenerativeModel({
   model: 'gemini-2.0-flash',
-  system_instruction: "You are an expert image analyzer. Provide a detailed and well-structured response to the user's question about the image. Use clear markdown formatting, including headings, lists, and bold text. Include emojis where appropriate to make the response engaging and easy to read. Your response should be in a friendly and helpful tone. Wrap your final response in a markdown code block."
+  systemInstruction:
+    "You are an expert image analyzer. Provide a detailed and well-structured response to the user's question about the image. Use clear markdown formatting, including headings, lists, and bold text. Include emojis where appropriate to make the response engaging and easy to read. Your response should be in a friendly and helpful tone. Wrap your final response in a markdown code block."
 });
 
-// === CORRECTION 2: Match the frontend route with /api/analyze ===
 app.post('/api/analyze', upload.single('image'), async (req, res) => {
   try {
     if (!req.file || !req.body.prompt) {
-      return res.status(400).send('Image and prompt are required.');
+      return res.status(400).json({ error: 'Image and prompt are required.' });
     }
 
-    const prompt = req.body.prompt;
-    const imageBuffer = req.file.buffer;
-    const mimeType = req.file.mimetype;
-
     const parts = [
-      bufferToGenerativePart(imageBuffer, mimeType),
-      { text: prompt },
+      bufferToGenerativePart(req.file.buffer, req.file.mimetype),
+      { text: req.body.prompt },
     ];
 
-    // The model is now initialized with the formatting instructions
-    const result = await model.generateContent({ contents: [{ role: 'user', parts }] });
-    const response = await result.response;
-    const text = response.text();
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts }],
+    });
 
+    const text = result.response.text();
     res.json({ result: text });
 
   } catch (error) {
-    console.error('Error calling Gemini API:', error);
+    console.error('Error calling Gemini API:', error.message);
     res.status(500).json({ error: 'Failed to generate content.' });
   }
 });
 
 app.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
+  console.log(`✅ Server running on http://localhost:${port}`);
 });
