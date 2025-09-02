@@ -4,12 +4,19 @@ import multer from 'multer';
 import dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
+// Load environment variables from .env file
 dotenv.config();
 
 const app = express();
+// Use process.env.PORT provided by Render
 const port = process.env.PORT || 5000;
 
-app.use(cors({ origin: 'http://localhost:5173' }));
+// Update CORS to allow requests from your Vercel frontend
+const allowedOrigins = [
+  'https://image-description-app-frontend.vercel.app',
+  'http://localhost:5173'
+];
+app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
 // Multer for image upload (5MB limit)
@@ -18,7 +25,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-// Initialize Gemini
+// Initialize Gemini with API key from environment variables
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
@@ -52,9 +59,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
         parts: [
           imagePart,
           {
-
-  text: `You are an expert image analyzer. Provide structured **GitHub-Flavored Markdown (GFM)**. Always include tables for tabular data, with headers and proper formatting. Do not include extra text outside the table unless explicitly asked. Align numbers properly. \n\nQuestion: ${req.body.prompt}`,
-
+            text: `You are an expert image analyzer. Provide structured **GitHub-Flavored Markdown (GFM)**. Always include tables for tabular data, with headers and proper formatting. Do not include extra text outside the table unless explicitly asked. Align numbers properly. \n\nQuestion: ${req.body.prompt}`,
           },
         ],
       },
@@ -96,5 +101,5 @@ app.post('/api/followup', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`✅ Server running on http://localhost:${port}`);
+  console.log(`✅ Server running on port ${port}`);
 });
