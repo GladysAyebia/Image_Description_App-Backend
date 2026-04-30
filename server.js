@@ -2,16 +2,12 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Load environment variables from .env file
 dotenv.config();
 
 const app = express();
-// Use process.env.PORT provided by Render
 const port = process.env.PORT || 5000;
 
-// Update CORS to allow requests from your Vercel frontend
 const allowedOrigins = [
   'https://image-description-app-frontend.vercel.app',
   'http://localhost:5173'
@@ -19,30 +15,42 @@ const allowedOrigins = [
 app.use(cors({ origin: allowedOrigins }));
 app.use(express.json());
 
-// Multer for image upload (5MB limit)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
-// Initialize Gemini with API key from environment variables
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const MODEL = process.env.OPENROUTER_MODEL || 'nvidia/nemotron-nano-12b-v2-vl:free';
 
-// Store sessions in memory
 const sessions = {};
 
-// Helper: Convert buffer to generative part
-function bufferToGenerativePart(buffer, mimeType) {
-  return {
-    inlineData: {
-      data: buffer.toString('base64'),
-      mimeType,
+async function callOpenRouter(messages, model = MODEL) {
+  const response = await fetch(OPENROUTER_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+      'HTTP-Referer': 'https://image-description-app-frontend.vercel.app',
+      'X-OpenRouter-Title': 'Image Description App',
     },
-  };
+    body: JSON.stringify({
+      model,
+      messages,
+      stream: false,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenRouter API error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data.choices[0].message.content;
 }
 
-// Start a new analysis session with an image + prompt
 app.post('/api/analyze', upload.single('image'), async (req, res) => {
   try {
     if (!req.file || !req.body.prompt) {
@@ -50,26 +58,30 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
     }
 
     const sessionId = Date.now().toString();
-    const imagePart = bufferToGenerativePart(req.file.buffer, req.file.mimetype);
+    const base64Image = req.file.buffer.toString('base64');
+    const dataUri = `data:${req.file.mimetype};base64,${base64Image}`;
 
-    // Explicit instruction for Markdown tables (GFM)
     const messages = [
       {
+        role: 'system',
+        content: 'You are an expert image analyzer. Provide structured **GitHub-Flavored Markdown (GFM)**. Always include tables for tabular data, with headers and proper formatting. Do not include extra text outside the table unless explicitly asked. Align numbers properly.',
+      },
+      {
         role: 'user',
-        parts: [
-          imagePart,
-          {
-            text: `You are an expert image analyzer. Provide structured **GitHub-Flavored Markdown (GFM)**. Always include tables for tabular data, with headers and proper formatting. Do not include extra text outside the table unless explicitly asked. Align numbers properly. \n\nQuestion: ${req.body.prompt}`,
-          },
+        content: [
+          { type: 'text', text: req.body.prompt },
+          { type: 'image_url', image_url: { url: dataUri } },
         ],
       },
     ];
 
-    const result = await model.generateContent({ contents: messages });
-    const text = result.response.text();
+    const text = await callOpenRouter(messages);
 
-    // Save session history
-    sessions[sessionId] = messages.concat({ role: 'model', parts: [{ text }] });
+    sessions[sessionId] = [
+      { role: 'system', content: messages[0].content },
+      { role: 'user', content: [{ type: 'text', text: req.body.prompt }, { type: 'image_url', image_url: { url: '[image]' } }] },
+      { role: 'assistant', content: text },
+    ];
 
     res.json({ sessionId, result: text });
   } catch (error) {
@@ -78,7 +90,6 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
   }
 });
 
-// Follow-up question
 app.post('/api/followup', async (req, res) => {
   try {
     const { sessionId, prompt } = req.body;
@@ -86,12 +97,11 @@ app.post('/api/followup', async (req, res) => {
     if (!sessionId || !prompt) return res.status(400).json({ error: 'sessionId and prompt are required.' });
     if (!sessions[sessionId]) return res.status(404).json({ error: 'Session not found.' });
 
-    sessions[sessionId].push({ role: 'user', parts: [{ text: prompt }] });
+    sessions[sessionId].push({ role: 'user', content: prompt });
 
-    const result = await model.generateContent({ contents: sessions[sessionId] });
-    const text = result.response.text();
+    const text = await callOpenRouter(sessions[sessionId]);
 
-    sessions[sessionId].push({ role: 'model', parts: [{ text }] });
+    sessions[sessionId].push({ role: 'assistant', content: text });
 
     res.json({ result: text });
   } catch (error) {
